@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ent3.tech — Sites</title>
+  <link rel="stylesheet" href="/static/style.css?v=9" />
+  <style>
+    .form-card {
+      background: #1e293b; border: 1px solid #334155;
+      border-radius: .5rem; padding: 1.25rem 1.5rem;
+    }
+    .form-row {
+      display: flex; gap: .75rem; align-items: flex-end; flex-wrap: wrap;
+    }
+    .form-group { display: flex; flex-direction: column; gap: .4rem; }
+    .form-group label { font-size: .7rem; color: #64748b; text-transform: uppercase; letter-spacing: .05em; }
+    .form-group select,
+    .form-group input {
+      background: #0f172a; border: 1px solid #334155; color: #e2e8f0;
+      border-radius: .35rem; padding: .45rem .75rem; font-size: .875rem;
+      outline: none;
+    }
+    .form-group select:focus,
+    .form-group input:focus { border-color: #475569; }
+    .subdomain-wrap { display: flex; align-items: center; gap: 0; }
+    .subdomain-wrap input {
+      border-radius: .35rem 0 0 .35rem; border-right: none; min-width: 140px;
+    }
+    .subdomain-suffix {
+      background: #0f172a; border: 1px solid #334155; border-left: none;
+      color: #475569; padding: .45rem .75rem; font-size: .875rem;
+      border-radius: 0 .35rem .35rem 0; white-space: nowrap;
+    }
+    .btn-primary {
+      background: #1d4ed8; color: #fff; border: none;
+      padding: .5rem 1.25rem; border-radius: .35rem; font-size: .875rem;
+      cursor: pointer; font-weight: 600; white-space: nowrap;
+    }
+    .btn-primary:hover { background: #2563eb; }
+    .btn-primary:disabled { background: #334155; color: #64748b; cursor: not-allowed; }
+
+    .error-msg { color: #f87171; font-size: .8rem; margin-top: .6rem; min-height: 1.2em; }
+    .success-msg { color: #4ade80; font-size: .8rem; margin-top: .6rem; min-height: 1.2em; }
+
+    .sites-grid { display: flex; flex-direction: column; gap: .6rem; }
+    .site-card {
+      background: #1e293b; border: 1px solid #334155;
+      border-radius: .5rem; padding: .9rem 1.25rem;
+      display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;
+    }
+    .site-card.disabled { opacity: .55; }
+    .site-info { display: flex; align-items: center; gap: .65rem; flex: 1; min-width: 0; }
+    .site-subdomain {
+      font-family: monospace; font-size: .9rem; font-weight: 600;
+      color: #e2e8f0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .type-badge {
+      font-size: .65rem; font-weight: 700; padding: .15rem .55rem;
+      border-radius: 9999px; text-transform: uppercase; letter-spacing: .05em;
+      white-space: nowrap;
+    }
+    .type-badge.static { background: #1e3a5f; color: #7dd3fc; }
+    .type-badge.python { background: #14532d; color: #86efac; }
+    .type-badge.node   { background: #365314; color: #bef264; }
+    .site-port { font-size: .78rem; color: #64748b; font-family: monospace; }
+    .site-actions { display: flex; align-items: center; gap: .5rem; flex-shrink: 0; }
+    .btn-toggle {
+      font-size: .75rem; padding: .25rem .75rem; border-radius: .3rem;
+      border: 1px solid #334155; background: transparent; cursor: pointer;
+      color: #94a3b8;
+    }
+    .btn-toggle:hover { background: #334155; color: #e2e8f0; }
+    .btn-delete {
+      font-size: .75rem; padding: .25rem .75rem; border-radius: .3rem;
+      border: 1px solid #7f1d1d; background: transparent; cursor: pointer;
+      color: #f87171;
+    }
+    .btn-delete:hover { background: #7f1d1d; color: #fca5a5; }
+    .btn-toggle:disabled,
+    .btn-delete:disabled { opacity: .4; cursor: not-allowed; }
+
+    .empty-state {
+      color: #475569; font-size: .85rem; text-align: center;
+      padding: 2rem; background: #1e293b; border: 1px dashed #334155;
+      border-radius: .5rem;
+    }
+
+    .status-dot {
+      width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+    }
+    .status-dot.on  { background: #22c55e; }
+    .status-dot.off { background: #475569; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>ent3.tech</h1>
+  <nav class="header-nav">
+    <a href="/" class="nav-link">Monitor</a>
+    <a href="/sites" class="nav-link active">Sites</a>
+  </nav>
+  <a href="/logout" class="btn-logout">Logout</a>
+</header>
+
+<main>
+
+  <section>
+    <h2>Add New Site</h2>
+    <div class="form-card">
+      <div class="form-row">
+        <div class="form-group">
+          <label>Type</label>
+          <select id="site-type" onchange="onTypeChange()">
+            <option value="static">Static</option>
+            <option value="python">Python</option>
+            <option value="node">Node.js</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Subdomain</label>
+          <div class="subdomain-wrap">
+            <input id="site-name" type="text" placeholder="myapp" autocomplete="off" spellcheck="false" />
+            <span class="subdomain-suffix">.ent3.tech</span>
+          </div>
+        </div>
+        <div class="form-group" id="port-group" style="display:none">
+          <label>Port</label>
+          <input id="site-port" type="number" placeholder="3001" min="1024" max="65535" style="width:90px" />
+        </div>
+        <div class="form-group" style="justify-content:flex-end">
+          <label>&nbsp;</label>
+          <button class="btn-primary" id="create-btn" onclick="createSite()">Create Site</button>
+        </div>
+      </div>
+      <div id="form-msg" class="error-msg"></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Sites</h2>
+    <div id="sites-list"><div class="empty-state">Loading…</div></div>
+  </section>
+
+</main>
+
+<script src="/static/sites.js?v=1"></script>
+</body>
+</html>

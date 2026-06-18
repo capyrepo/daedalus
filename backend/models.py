@@ -63,3 +63,16 @@ class ServiceInfo(BaseModel):
     sub: str
     description: str
 
+
+class Site(BaseModel):
+    subdomain: str      # full subdomain, e.g. "app.ent3.tech"
+    type: str           # "static" | "python" | "node"
+    port: int | None
+    enabled: bool
+
+
+class SiteCreate(BaseModel):
+    name: str           # subdomain name only, e.g. "app"
+    type: str           # "static" | "python" | "node"
+    port: int | None = None
+
