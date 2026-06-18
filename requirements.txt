@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+httpx
+psutil
+aiosqlite
+python-multipart
+itsdangerous
+python-pam
+ptyprocess

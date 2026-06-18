@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ent3.tech — Server Monitor</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5/css/xterm.css" />
+  <link rel="stylesheet" href="/static/style.css?v=9" />
+</head>
+<body>
+
+<header>
+  <h1>ent3.tech</h1>
+  <span id="last-updated" class="last-updated">—</span>
+  <a href="/logout" class="btn-logout">Logout</a>
+</header>
+
+<main>
+
+  <section>
+    <h2>CPU &amp; Memory</h2>
+    <div class="gauges">
+      <div class="gauge">
+        <div class="gauge-label">CPU</div>
+        <div class="gauge-value" id="cpu-value">—</div>
+        <div class="bar"><div class="bar-fill low" id="cpu-fill" style="width:0%"></div></div>
+      </div>
+      <div class="gauge">
+        <div class="gauge-label">Memory</div>
+        <div class="gauge-value" id="memory-value">—</div>
+        <div class="gauge-sub" id="memory-sub">—</div>
+        <div class="bar"><div class="bar-fill low" id="memory-fill" style="width:0%"></div></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Top Processes</h2>
+    <div id="process-table">—</div>
+  </section>
+
+  <section>
+    <h2>Disk</h2>
+    <div id="disk-list" class="disk-list">—</div>
+  </section>
+
+  <section>
+    <h2>Network</h2>
+    <div class="gauges">
+      <div class="gauge">
+        <div class="gauge-label">Inbound</div>
+        <div class="gauge-value" id="net-recv-value">—</div>
+        <div class="bar"><div class="bar-fill low" id="net-recv-fill" style="width:0%"></div></div>
+      </div>
+      <div class="gauge">
+        <div class="gauge-label">Outbound</div>
+        <div class="gauge-value" id="net-sent-value">—</div>
+        <div class="bar"><div class="bar-fill low" id="net-sent-fill" style="width:0%"></div></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Nginx</h2>
+    <div class="nginx-panel" id="nginx-panel">
+      <div class="nginx-stat">
+        <span class="gauge-label">Status</span>
+        <span id="nginx-running">—</span>
+      </div>
+      <div class="nginx-stat">
+        <span class="gauge-label">Active Connections</span>
+        <span class="gauge-value" id="nginx-conns">—</span>
+      </div>
+      <div class="nginx-stat">
+        <span class="gauge-label">Requests / sec</span>
+        <span class="gauge-value" id="nginx-rps">—</span>
+      </div>
+    </div>
+  </section>
+
+  <section id="raid-section" style="display:none">
+    <h2>RAID</h2>
+    <div id="raid-arrays"></div>
+  </section>
+
+  <section id="services-section" style="display:none">
+    <h2>Failed Services</h2>
+    <div id="services-list"></div>
+  </section>
+
+  <section id="terminal-section">
+    <h2>Terminal <button id="terminal-toggle" onclick="toggleTerminal()">Show</button></h2>
+    <div id="terminal-wrap" style="display:none">
+      <div id="terminal-el"></div>
+    </div>
+  </section>
+
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/xterm@5/lib/xterm.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8/lib/xterm-addon-fit.js"></script>
+<script src="/static/app.js?v=7"></script>
+</body>
+</html>
