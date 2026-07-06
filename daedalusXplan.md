@@ -20,6 +20,7 @@ Two capabilities, scoped for a personal home server (not an enterprise SIEM — 
 
 1. **Malware/virus scanning** of the filesystem (hosted sites, home directories, or any path the owner points it at).
 2. **Intrusion detection** — surfacing attempts by unauthorized parties to access the server (SSH brute force, banned IPs, unexpected open ports).
+3. **Invader logging** — persist every intrusion attempt with the source IP address and its geolocation (country/city), so past attackers can be reviewed later, not just the live "recent events" feed.
 
 ## 3. Tool Choices & Rationale
 
@@ -28,6 +29,7 @@ Two capabilities, scoped for a personal home server (not an enterprise SIEM — 
   1. Parse SSH auth logs (`journalctl -u ssh`/`sshd`, falling back to `/var/log/auth.log`) for `Failed password`/`Invalid user` lines, aggregate failures per source IP to flag brute-force attempts.
   2. If `fail2ban` is installed, mirror its ban state via `fail2ban-client status <jail>` (read-only surfacing, not reimplementing its ban logic).
   3. Periodic snapshot of listening sockets (`psutil.net_connections`) to flag unexpected listeners.
+- **IP geolocation: local MaxMind GeoLite2-City database** (`.mmdb` file, looked up via the `geoip2` Python library). Chosen over a live third-party geolocation API because lookups happen entirely offline — no per-lookup network call, no rate limits, and attacker IPs are never sent to an external service. The `.mmdb` file is downloaded once (free MaxMind account + license key) during setup and can be refreshed periodically; a missing/stale database degrades gracefully (events are still logged, just without country/city filled in).
 
 ## 4. Project Layout
 
@@ -51,7 +53,7 @@ sentinel/
 ├── scripts/
 │   ├── sentinel-helper.sh  # privileged root helper (own sudoers entry)
 │   └── setup-sentinel.sh   # installs ClamAV/fail2ban, the helper, sudoers, systemd unit
-└── requirements.txt         # own Python deps (fastapi, uvicorn, aiosqlite, psutil, python-multipart, itsdangerous, + python-pam if PAM auth is reused)
+└── requirements.txt         # own Python deps (fastapi, uvicorn, aiosqlite, psutil, geoip2, python-multipart, itsdangerous, + python-pam if PAM auth is reused)
 ```
 
 Running this as its own `systemd` service on its own port keeps it operable even if the daedalus dashboard is down, and keeps a compromise of one app from automatically exposing the other.
@@ -93,6 +95,21 @@ class IntrusionEvent(BaseModel):
     event_type: str              # "ssh_bruteforce" | "banned" | "unexpected_listener" | "suspicious_connection"
     detail: str
     severity: str                # "info" | "warning" | "critical"
+    country: str | None = None   # geolocated from source_ip, None if private/unresolvable
+    city: str | None = None
+    latitude: float | None = None
+    longitude: float | None = None
+
+class InvaderSummary(BaseModel):
+    ip: str
+    country: str | None
+    city: str | None
+    latitude: float | None = None
+    longitude: float | None = None
+    first_seen: str
+    last_seen: str
+    attempt_count: int
+    event_types: list[str]        # distinct event_type values seen for this IP
 
 class BannedIP(BaseModel):
     ip: str
@@ -139,7 +156,11 @@ CREATE TABLE IF NOT EXISTS intrusion_events (
     source_ip TEXT NOT NULL,
     event_type TEXT NOT NULL,
     detail TEXT NOT NULL,
-    severity TEXT NOT NULL
+    severity TEXT NOT NULL,
+    country TEXT,
+    city TEXT,
+    latitude REAL,
+    longitude REAL
 );
 
 CREATE INDEX IF NOT EXISTS idx_intrusion_ip_time ON intrusion_events(source_ip, detected_at);
@@ -159,7 +180,10 @@ CREATE INDEX IF NOT EXISTS idx_intrusion_ip_time ON intrusion_events(source_ip, 
 - `_parse_auth_log()` — tail SSH auth logs, aggregate failures per IP, flag brute force.
 - `_refresh_fail2ban()` — mirror `fail2ban-client status <jail>` if available.
 - `_refresh_listeners()` — snapshot listening sockets via `psutil.net_connections`, flag unexpected ports.
+- `_geolocate_ip(ip) -> tuple[country, city, lat, lon]` — looks up `ip` in the local GeoLite2-City `.mmdb` via `geoip2.database.Reader`; returns all-`None` for private/reserved IPs (`ipaddress.ip_address(ip).is_private`) or if the database file is missing, so a single bad/missing lookup never blocks logging the event itself.
+- Every inserted `IntrusionEvent` row is enriched with `_geolocate_ip(source_ip)` before being written, so the log is queryable by location later even though only new alerts (post-dedupe) get written.
 - Dedupe repeated alerts per IP+event_type within a time window (e.g. 10 minutes) so the loop doesn't flood the events table.
+- `async def list_invaders() -> list[InvaderSummary]` — `SELECT source_ip, country, city, latitude, longitude, MIN(detected_at), MAX(detected_at), COUNT(*), GROUP_CONCAT(DISTINCT event_type) ... GROUP BY source_ip ORDER BY MAX(detected_at) DESC` against `intrusion_events` — no new table needed, this is just an aggregated read over the existing log.
 - `ban_ip(ip)` / `unban_ip(ip)` — validate IP format (`ipaddress.ip_address`), call the privileged helper. Phase 3 only.
 
 **Note:** start scanning/log-reading unprivileged first — likely readable without root depending on the service account's group membership. Only route an operation through the sudo helper if it actually hits a `PermissionError` in practice.
@@ -176,7 +200,8 @@ Own FastAPI app, its own root-level paths (no need for a `/security` prefix sinc
 | POST | `/api/scan` | Trigger a scan (`ScanRequest` body), 202 + scan id, 409 if already running | 1 |
 | GET | `/api/scan/{scan_id}` | Poll one scan's `ScanResult` | 1 |
 | GET | `/api/scans` | Scan history (last 20) | 1 |
-| GET | `/api/events` | Recent `IntrusionEvent`s | 2 |
+| GET | `/api/events` | Recent `IntrusionEvent`s (with location fields) | 2 |
+| GET | `/api/invaders` | Aggregated per-IP `InvaderSummary` list (location, first/last seen, attempt count) | 2 |
 | GET | `/api/banned` | Currently banned IPs | 3 |
 | POST | `/api/ban` | Ban an IP (`{ip: str}`) | 3 |
 | POST | `/api/unban` | Unban an IP | 3 |
@@ -203,7 +228,9 @@ set -euo pipefail
 # 4. install -m 0755 sentinel/scripts/sentinel-helper.sh /usr/local/bin/sentinel-helper
 # 5. write + validate /etc/sudoers.d/sentinel (visudo -c)
 # 6. usermod -aG adm <sentinel-service-user>       # unprivileged auth-log reads where possible
-# 7. install a systemd unit running `uvicorn sentinel.backend.main:app --port 8001`
+# 7. download GeoLite2-City.mmdb (requires a free MaxMind account + license key) to
+#    sentinel/backend/GeoLite2-City.mmdb — documented manual step, not automated (license key is a secret)
+# 8. install a systemd unit running `uvicorn sentinel.backend.main:app --port 8001`
 ```
 
 Idempotent and safe to re-run.
@@ -214,6 +241,7 @@ Own dark-theme dashboard page (own `style.css`, not shared with daedalus's), wit
 
 - **Scan card** — path selector, "Scan Now" button, last scan result badge (green if clean, red if threats found), scan history list.
 - **Intrusion events card** — recent events table (time, IP, type, severity badge), auto-refreshed.
+- **Invaders card** — one row per distinct attacker IP: country/city, first seen, last seen, attempt count, event types — the persistent "who's been trying to get in" log, separate from the live recent-events feed.
 - **Banned IPs card** (Phase 3) — list with unban action, manual ban-IP input.
 - **Unexpected listeners card** — table of non-allowlisted open ports.
 - Own `esc()`-style HTML-escaping helper for rendering file paths/log lines/IPs, since that data can contain attacker-influenced content and must never be interpolated as raw HTML.
@@ -221,7 +249,7 @@ Own dark-theme dashboard page (own `style.css`, not shared with daedalus's), wit
 ## 13. Phasing
 
 - **Phase 1 — Scaffolding + malware scan (on-demand)**: project skeleton (`sentinel/backend`, `sentinel/frontend`, own `requirements.txt`), own login/auth, `scan_results` table, scanner logic, scan routes, scan-card UI. Skip the privileged helper initially — add it only if a real permission wall is hit.
-- **Phase 2 — Intrusion log parsing + alerting**: `intrusion_events` table, remaining models, auth-log parsing/listener-snapshot logic, background task wiring, events + listeners UI.
+- **Phase 2 — Intrusion log parsing + alerting**: `intrusion_events` table (with location columns), remaining models (`IntrusionEvent`, `InvaderSummary`, `NetworkListener`), auth-log parsing/listener-snapshot logic, GeoLite2 lookup wiring, `/api/invaders`, background task wiring, events + invaders + listeners UI.
 - **Phase 3 — fail2ban integration + IP banning**: `BannedIP` model, fail2ban mirroring, helper `ban-ip`/`unban-ip`/`fail2ban-status` subcommands + sudoers, ban/unban routes and UI.
 
 This order front-loads the lowest-risk, highest-value capability (scanning known file locations) before adding privileged network-defense actions.
