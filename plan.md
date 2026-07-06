@@ -1,37 +1,73 @@
-# Security Module Plan: Malware Scanning & Intrusion Detection
+# Plan: Sentinel — Standalone Malware Scanning & Intrusion Detection App
 
-## 1. Existing App Feature Summary
+## 1. Context: What This Is (and Isn't)
 
-Daedalus is a personal home-server dashboard (FastAPI backend + vanilla JS/HTML frontend, no build step). Today it provides:
+This is **not** a module bolted onto the existing daedalus dashboard. It's a separate application — code-named **Sentinel** below (rename freely) — that happens to live in this same repo, in its own top-level directory, as its own independent service:
 
-- **System monitoring** — CPU/memory/disk/process stats (`backend/collector.py` + `psutil`), shown on the main dashboard (`/`).
-- **RAID array status** — parses `/proc/mdstat` for array health/sync progress (`backend/raid.py`).
-- **Systemd services status** — up/down state of configured services.
-- **Nginx status** — reverse-proxy health info.
-- **Sites Manager** (`/sites`) — create/enable/disable/delete nginx-hosted subdomains from the browser, backed by a sudo-restricted helper script (`backend/sites.py` + `scripts/site-helper.sh`).
-- **Web terminal** — an interactive shell in the browser over WebSocket, backed by a `tmux`-attached PTY (`backend/terminal.py`).
-- **Authentication** — login against real Linux system accounts via PAM, cookie-based session (`backend/auth.py`).
+- Its own FastAPI process, listening on its own port (e.g. `8001`), with its own `systemd` unit.
+- Its own login/session, own SQLite database file, own privileged-helper script + sudoers entry.
+- **No changes to any existing file**: `backend/main.py`, `backend/auth.py`, `backend/collector.py`, `backend/models.py`, `backend/database.py`, and all of `frontend/` are untouched. No nav link is added to the existing dashboard, no shared session/cookie, no shared cache.
 
-## 2. New Feature: Overview & Scope
+It reuses *ideas* from daedalus's existing conventions where they're just good patterns for this kind of project (the sudo-restricted privileged-helper script, dark-theme card/badge UI, PAM-based login) — but as independent code, copied and adapted, not imported or wired in.
 
-Add a **Security** module covering two capabilities, scoped for a personal home server (not an enterprise SIEM — no packet capture, no ML anomaly detection, no cross-host correlation):
+### Existing daedalus app, for reference/context only
 
-1. **Malware/virus scanning** of the server's filesystem (hosted sites, home directories).
+The current dashboard (`backend/` + `frontend/` at repo root) provides system monitoring (CPU/memory/disk/process stats), RAID array status, systemd services status, nginx status, a Sites Manager for nginx-hosted subdomains, a web terminal, and PAM-based login. Sentinel does not touch or depend on any of it.
+
+## 2. Scope
+
+Two capabilities, scoped for a personal home server (not an enterprise SIEM — no packet capture, no ML anomaly detection, no cross-host correlation):
+
+1. **Malware/virus scanning** of the filesystem (hosted sites, home directories, or any path the owner points it at).
 2. **Intrusion detection** — surfacing attempts by unauthorized parties to access the server (SSH brute force, banned IPs, unexpected open ports).
 
 ## 3. Tool Choices & Rationale
 
-- **Malware scanning: ClamAV** (`clamdscan` against the `clamd` daemon when running, falling back to one-shot `clamscan`). It's the standard mature open-source AV engine with a CLI and signature-update pipeline (`freshclam`) — no Python bindings needed, consistent with how this repo already shells out to system tools (`nginx`, `systemctl`, `mdstat`) rather than adding library dependencies. Rejected alternatives: `rkhunter`/`chkrootkit` (rootkit-only, no real signature DB, poor machine-readable output), commercial engines (licensing/cloud dependency, inappropriate for a home server).
+- **Malware scanning: ClamAV** (`clamdscan` against the `clamd` daemon when running, falling back to one-shot `clamscan`). Standard mature open-source AV engine with a CLI and signature-update pipeline (`freshclam`) — shell out to it, no Python bindings needed. Rejected alternatives: `rkhunter`/`chkrootkit` (rootkit-only, no real signature DB), commercial engines (licensing/cloud dependency, overkill for a home server).
 - **Intrusion detection: log parsing + optional fail2ban + connection snapshot**, not a SIEM:
   1. Parse SSH auth logs (`journalctl -u ssh`/`sshd`, falling back to `/var/log/auth.log`) for `Failed password`/`Invalid user` lines, aggregate failures per source IP to flag brute-force attempts.
-  2. If `fail2ban` is installed, mirror its ban state via `fail2ban-client status <jail>` (read-only surfacing — not reimplementing its ban logic).
-  3. Periodic snapshot of listening sockets (`psutil.net_connections`, same library `collector.py` already uses) to flag unexpected listeners.
+  2. If `fail2ban` is installed, mirror its ban state via `fail2ban-client status <jail>` (read-only surfacing, not reimplementing its ban logic).
+  3. Periodic snapshot of listening sockets (`psutil.net_connections`) to flag unexpected listeners.
 
-## 4. Data Model (additions to `backend/models.py`)
+## 4. Project Layout
+
+New top-level directory, sibling to the existing `backend/`/`frontend`/`scripts`:
+
+```
+sentinel/
+├── backend/
+│   ├── __init__.py
+│   ├── main.py            # its own FastAPI app + lifespan, own port (e.g. 8001)
+│   ├── auth.py             # own login/session (PAM or a simple local password — decide before Phase 1)
+│   ├── models.py           # Pydantic models (below)
+│   ├── database.py         # own aiosqlite file: sentinel.db
+│   ├── scanner.py          # malware scan logic
+│   └── intrusion.py        # log parsing / fail2ban / listener snapshot logic
+├── frontend/
+│   ├── login.html
+│   ├── index.html          # single dashboard page (scan + intrusion cards)
+│   ├── app.js
+│   └── style.css           # own stylesheet (can echo daedalus's dark palette, but not shared)
+├── scripts/
+│   ├── sentinel-helper.sh  # privileged root helper (own sudoers entry)
+│   └── setup-sentinel.sh   # installs ClamAV/fail2ban, the helper, sudoers, systemd unit
+└── requirements.txt         # own Python deps (fastapi, uvicorn, aiosqlite, psutil, python-multipart, itsdangerous, + python-pam if PAM auth is reused)
+```
+
+Running this as its own `systemd` service on its own port keeps it operable even if the daedalus dashboard is down, and keeps a compromise of one app from automatically exposing the other.
+
+## 5. Auth
+
+Own session, independent of daedalus's cookie:
+
+- Simplest option: reuse the PAM-against-Linux-accounts approach (`python-pam`, same idea as daedalus's `auth.py` but a separate `SECRET_KEY`/cookie name so sessions never cross apps).
+- `require_auth(request)` dependency, same shape as daedalus's (redirect to `/login` if no session) — copied and adapted, not imported cross-directory.
+
+## 6. Data Model (`sentinel/backend/models.py`)
 
 ```python
 class ScanRequest(BaseModel):
-    path: str | None = None   # defaults to /var/www if omitted
+    path: str | None = None   # defaults to a configured root if omitted
 
 class ScanResult(BaseModel):
     id: int | None = None
@@ -79,9 +115,9 @@ class SecurityStatus(BaseModel):
     fail2ban_available: bool
 ```
 
-## 5. Persistence (`backend/database.py`)
+## 7. Persistence (`sentinel/backend/database.py`)
 
-This module currently has an unused `aiosqlite` connection helper (`get_db()`) with no tables anywhere in the repo. This feature is the first real consumer. Add an `init_db()` bootstrap, called from `main.py`'s `lifespan()`:
+Own SQLite file (`sentinel.db`, separate from daedalus's unused `webmonitor.db`), with an `init_db()` bootstrap called at startup:
 
 ```sql
 CREATE TABLE IF NOT EXISTS scan_results (
@@ -109,62 +145,54 @@ CREATE TABLE IF NOT EXISTS intrusion_events (
 CREATE INDEX IF NOT EXISTS idx_intrusion_ip_time ON intrusion_events(source_ip, detected_at);
 ```
 
-## 6. Backend Module (`backend/security.py`)
+## 8. Backend Logic
 
-New file, following `collector.py`'s cache+periodic-refresh pattern for cheap checks and `sites.py`'s subprocess pattern for shelling out:
+**`sentinel/backend/scanner.py`**:
+- `SCAN_ALLOWLIST` — configurable list of paths the app is allowed to scan (e.g. `/var/www`, `/home`); reject anything outside it.
+- `async def trigger_scan(path) -> ScanResult` — validate path is allowlisted, reject if a scan is already running, insert a `status="running"` row, spawn `_run_scan()` as a background task, return immediately so the UI can poll.
+- `async def _run_scan(path, row_id)` — run `clamdscan -r <path>` (or `clamscan` fallback) via `asyncio.create_subprocess_exec`, parse the scan summary + infected-file list, update the DB row.
+- `get_scan_status()` / `list_scan_history()` — read accessors.
 
-- `HELPER = "/usr/local/bin/webmonitor-security-helper"`, `SCAN_ALLOWLIST = [Path("/var/www"), Path("/home")]`.
-- `async def startup()` — probe `clamav_available`/`fail2ban_available` via `shutil.which`, run one initial intrusion refresh, load last scan summary from DB.
-- `async def run_forever()` — collector-style loop refreshing the intrusion snapshot every `INTRUSION_INTERVAL` (45s), wrapped in try/except so one failure doesn't kill the loop.
-- `async def trigger_scan(path) -> ScanResult` — validates `path` resolves under `SCAN_ALLOWLIST`, rejects if a scan is already running, inserts a `status="running"` DB row, spawns `_run_scan()` as a background task, returns immediately so the UI can poll.
-- `async def _run_scan(path, row_id)` — runs `clamdscan -r <path>` (or `clamscan` fallback) via `asyncio.create_subprocess_exec`, parses the scan summary + infected-file list, updates the DB row and cache.
-- `async def _refresh_intrusion()` — parses auth logs for brute-force IPs, mirrors fail2ban bans, snapshots unexpected listeners; deduplicates repeated alerts per IP+event_type within a 10-minute window so the background loop doesn't flood the events table.
-- `get_cached(key)` / `get_scan_status()` / `list_scan_history()` / `get_status()` — read accessors for the API routes.
+**`sentinel/backend/intrusion.py`**:
+- `async def startup()` — probe `clamav_available`/`fail2ban_available` via `shutil.which`, run one initial refresh.
+- `async def run_forever()` — periodic loop (e.g. every 45s) refreshing the intrusion snapshot, wrapped in try/except so one failure doesn't kill the loop.
+- `_parse_auth_log()` — tail SSH auth logs, aggregate failures per IP, flag brute force.
+- `_refresh_fail2ban()` — mirror `fail2ban-client status <jail>` if available.
+- `_refresh_listeners()` — snapshot listening sockets via `psutil.net_connections`, flag unexpected ports.
+- Dedupe repeated alerts per IP+event_type within a time window (e.g. 10 minutes) so the loop doesn't flood the events table.
 - `ban_ip(ip)` / `unban_ip(ip)` — validate IP format (`ipaddress.ip_address`), call the privileged helper. Phase 3 only.
 
-**Note:** start scanning/log-reading unprivileged first — `/var/www` and the app's own home directory are likely readable without root. Only route an operation through the sudo helper if it actually hits a `PermissionError` in practice; don't default everything to privileged out of caution.
+**Note:** start scanning/log-reading unprivileged first — likely readable without root depending on the service account's group membership. Only route an operation through the sudo helper if it actually hits a `PermissionError` in practice.
 
-## 7. API Routes (`backend/main.py`)
+## 9. API Routes (`sentinel/backend/main.py`)
 
-Page route (manual session check, same pattern as `/sites`):
-
-```python
-@app.get("/security", response_class=HTMLResponse)
-async def security_page(request: Request):
-    if not request.session.get("username"):
-        return RedirectResponse("/login", status_code=302)
-    return _SECURITY_HTML
-```
-
-JSON routes (all using the existing `Depends(require_auth)` + `isinstance(auth, RedirectResponse)` boilerplate):
+Own FastAPI app, its own root-level paths (no need for a `/security` prefix since this is the whole app, not a section of a larger one):
 
 | Method | Path | Purpose | Phase |
 |---|---|---|---|
-| GET | `/api/security/status` | Full `SecurityStatus` snapshot | 1 (scan fields), 2/3 (rest) |
-| POST | `/api/security/scan` | Trigger a scan (`ScanRequest` body), 202 + scan id, 409 if already running | 1 |
-| GET | `/api/security/scan/{scan_id}` | Poll one scan's `ScanResult` | 1 |
-| GET | `/api/security/scans` | Scan history (last 20) | 1 |
-| GET | `/api/security/events` | Recent `IntrusionEvent`s | 2 |
-| GET | `/api/security/banned` | Currently banned IPs | 3 |
-| POST | `/api/security/ban` | Ban an IP (`{ip: str}`) | 3 |
-| POST | `/api/security/unban` | Unban an IP | 3 |
+| GET | `/` | Dashboard page (scan + intrusion cards) | 1 |
+| GET | `/login` | Login page | 1 |
+| GET | `/api/status` | Full `SecurityStatus` snapshot | 1 (scan fields), 2/3 (rest) |
+| POST | `/api/scan` | Trigger a scan (`ScanRequest` body), 202 + scan id, 409 if already running | 1 |
+| GET | `/api/scan/{scan_id}` | Poll one scan's `ScanResult` | 1 |
+| GET | `/api/scans` | Scan history (last 20) | 1 |
+| GET | `/api/events` | Recent `IntrusionEvent`s | 2 |
+| GET | `/api/banned` | Currently banned IPs | 3 |
+| POST | `/api/ban` | Ban an IP (`{ip: str}`) | 3 |
+| POST | `/api/unban` | Unban an IP | 3 |
 
-`_SECURITY_HTML` is loaded in `lifespan()` alongside the other page globals; `security.startup()` and a second `asyncio.create_task(security.run_forever())` are started/cancelled alongside the existing collector task.
+## 10. Privileged Helper (`sentinel/scripts/sentinel-helper.sh`)
 
-## 8. Privileged Helper (`scripts/security-helper.sh`)
+Root-owned bash script, `set -euo pipefail`, `case "$CMD" in ...)` dispatch, validate-then-act (mirrors the *pattern* used by daedalus's `scripts/site-helper.sh`, as an independent script):
 
-Mirrors `scripts/site-helper.sh`'s structure (`set -euo pipefail`, `case "$CMD" in ...)` dispatch, validate-then-act):
+- `scan <path>` — `clamdscan -r <path>` as root, only for paths a `validate_path()` guard confirms (via `realpath`) are inside the allowlist — rejects traversal.
+- `read-auth-log` — `cat` the auth log, only needed if the service account can't already read it.
+- `fail2ban-status <jail>` — `fail2ban-client status <jail>`.
+- `ban-ip <ip> [jail]` / `unban-ip <ip> [jail]` — `fail2ban-client set <jail> banip/unbanip <ip>`, with a `validate_ip()` regex guard first.
 
-- `scan <path>` — `clamdscan -r <path>` as root, only for paths a `validate_path()` guard confirms (via `realpath`) are prefixed by `/var/www/` or `/home/` — rejects traversal and anything outside the allowlist.
-- `read-auth-log` — `cat` the auth log, only needed if the app user can't already read it.
-- `fail2ban-status <jail>` — `fail2ban-client status <jail>` (querying fail2ban typically requires root/socket access).
-- `ban-ip <ip> [jail]` / `unban-ip <ip> [jail]` — `fail2ban-client set <jail> banip/unbanip <ip>`, with a `validate_ip()` regex guard before the IP ever reaches `fail2ban-client`.
+Installed with its own narrow `/etc/sudoers.d/sentinel` entry, NOPASSWD scoped to the exact helper path only.
 
-Installed with a narrow `/etc/sudoers.d/webmonitor-security` entry, NOPASSWD scoped to the exact helper path only — same isolation principle as the existing sites helper.
-
-## 9. Setup/Install Script (`scripts/setup-security.sh`)
-
-No installer script exists anywhere in this repo today for system-level dependencies (the sites feature's installer was never committed). This feature adds the first one:
+## 11. Setup/Install Script (`sentinel/scripts/setup-sentinel.sh`)
 
 ```bash
 #!/usr/bin/env bash
@@ -172,31 +200,35 @@ set -euo pipefail
 # 1. apt-get install -y clamav clamav-daemon fail2ban
 # 2. systemctl enable --now clamav-freshclam clamav-daemon fail2ban
 # 3. freshclam                                    # initial signature pull
-# 4. install -m 0755 scripts/security-helper.sh /usr/local/bin/webmonitor-security-helper
-# 5. write + validate /etc/sudoers.d/webmonitor-security (visudo -c)
-# 6. usermod -aG adm <app-user>                    # unprivileged auth-log reads where possible
+# 4. install -m 0755 sentinel/scripts/sentinel-helper.sh /usr/local/bin/sentinel-helper
+# 5. write + validate /etc/sudoers.d/sentinel (visudo -c)
+# 6. usermod -aG adm <sentinel-service-user>       # unprivileged auth-log reads where possible
+# 7. install a systemd unit running `uvicorn sentinel.backend.main:app --port 8001`
 ```
 
-Idempotent and safe to re-run, matching the tone of `site-helper.sh`'s existing idempotency checks.
+Idempotent and safe to re-run.
 
-## 10. Frontend (`frontend/security.html` + `frontend/security.js`)
+## 12. Frontend (`sentinel/frontend/`)
 
-New page following `sites.html`/`sites.js` conventions exactly (dark theme, card/badge styling from `style.css`, the `api()` fetch wrapper with 401/403 → login redirect, and `esc()` from `app.js` for XSS-safe rendering of file paths/log lines/IPs):
+Own dark-theme dashboard page (own `style.css`, not shared with daedalus's), with:
 
-- **Scan card** — path selector (default `/var/www`), "Scan Now" button, last scan result badge (green if clean, red if threats found), scan history list.
+- **Scan card** — path selector, "Scan Now" button, last scan result badge (green if clean, red if threats found), scan history list.
 - **Intrusion events card** — recent events table (time, IP, type, severity badge), auto-refreshed.
 - **Banned IPs card** (Phase 3) — list with unban action, manual ban-IP input.
 - **Unexpected listeners card** — table of non-allowlisted open ports.
+- Own `esc()`-style HTML-escaping helper for rendering file paths/log lines/IPs, since that data can contain attacker-influenced content and must never be interpolated as raw HTML.
 
-Add `<a href="/security" class="nav-link">Security</a>` to the header nav of every existing HTML page (`index.html`, `sites.html`, `login.html` where applicable) and the new page itself.
+## 13. Phasing
 
-## 11. Phasing
-
-- **Phase 1 — Malware scan (on-demand) + basic UI**: `models.py` additions (`ScanResult`/`ScanSummary`/`ScanRequest`), `scan_results` table, `security.py` scan functions, scan routes, scan-card UI, nav links. Skip the privileged helper initially — add it only if a real permission wall is hit.
-- **Phase 2 — Intrusion log parsing + alerting**: `intrusion_events` table, remaining models, `_refresh_intrusion`/log-parsing/listener-snapshot logic, background task wiring, events + listeners UI.
+- **Phase 1 — Scaffolding + malware scan (on-demand)**: project skeleton (`sentinel/backend`, `sentinel/frontend`, own `requirements.txt`), own login/auth, `scan_results` table, scanner logic, scan routes, scan-card UI. Skip the privileged helper initially — add it only if a real permission wall is hit.
+- **Phase 2 — Intrusion log parsing + alerting**: `intrusion_events` table, remaining models, auth-log parsing/listener-snapshot logic, background task wiring, events + listeners UI.
 - **Phase 3 — fail2ban integration + IP banning**: `BannedIP` model, fail2ban mirroring, helper `ban-ip`/`unban-ip`/`fail2ban-status` subcommands + sudoers, ban/unban routes and UI.
 
-This order front-loads the lowest-risk, highest-value capability (scanning known file locations) before adding privileged network-defense actions that carry more blast-radius if misused.
+This order front-loads the lowest-risk, highest-value capability (scanning known file locations) before adding privileged network-defense actions.
+
+## 14. Possible Future Integration (not now)
+
+Once Sentinel exists as a working standalone service, it could optionally be exposed as its own subdomain through daedalus's existing Sites Manager (`/sites`), or linked from the dashboard nav — but that's a later decision, not part of this plan, and would still not require merging the two codebases or sharing sessions/databases.
 
 ## Out of Scope (for this document)
 
